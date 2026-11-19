@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>PIM-SM 稀疏模式组播仿真</title>
+<style>
+  body { margin:0; font:13px/1.5 -apple-system,"PingFang SC",sans-serif; display:flex; height:100vh; background:#0f1420; color:#dfe6f0; }
+  #left { flex:1; position:relative; }
+  #panel { width:380px; border-left:1px solid #2a3350; padding:10px; overflow-y:auto; background:#141a2c; }
+  svg { width:100%; height:100%; }
+  .node-r { fill:#3b82f6; stroke:#93c5fd; stroke-width:1.5; }
+  .node-rp { stroke:#fbbf24; stroke-width:3; }
+  .node-h { fill:#64748b; stroke:#94a3b8; }
+  .node-s { fill:#ef4444; stroke:#fca5a5; }
+  .lbl { fill:#e5edff; font-size:11px; text-anchor:middle; }
+  .segline { stroke:#3a4568; stroke-width:2; }
+  .segline.hot { stroke:#22c55e; stroke-width:3; }
+  .segline.down { stroke:#7f1d1d; stroke-dasharray:4 4; }
+  .segdot { fill:#4a5578; }
+  .segdot.hot { fill:#22c55e; }
+  .edge-rpt { stroke:#60a5fa; stroke-width:2; stroke-dasharray:6 3; fill:none; marker-end:url(#arrB); }
+  .edge-spt { stroke:#4ade80; stroke-width:2.5; fill:none; marker-end:url(#arrG); }
+  h3 { margin:8px 0 4px; font-size:13px; color:#93c5fd; }
+  button { background:#1e2a4a; color:#cfe0ff; border:1px solid #35508a; border-radius:4px; padding:3px 8px; margin:2px; cursor:pointer; font-size:12px; }
+  button.on { background:#14532d; border-color:#22c55e; }
+  button.off { background:#3f1d1d; border-color:#ef4444; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  td,th { border:1px solid #2a3350; padding:2px 6px; text-align:left; vertical-align:top; }
+  .stat-ok { color:#4ade80; } .stat-bad { color:#f87171; }
+  .muted { color:#7c8db0; }
+</style>
+</head>
+<body>
+<div id="left"><svg id="svg"></svg></div>
+<div id="panel">
+  <h3>组播组 <select id="group"><option>G1</option></select>
+    <span class="muted" id="clock"></span></h3>
+  <div id="actions"></div>
+  <h3>接收者统计(收/丢/重)</h3>
+  <div id="hosts"></div>
+  <h3>路由器状态项</h3>
+  <div id="routers"></div>
+</div>
+<script>
+const svg = document.getElementById('svg');
+let topo = null, prevTx = {}, hotSegs = new Set();
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs){ const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
+
+async function load(){
+  topo = await (await fetch('/api/topo')).json();
+  setInterval(tick, 600); tick();
+}
+
+async function tick(){
+  const g = document.getElementById('group').value;
+  const st = await (await fetch('/api/state?g='+g)).json();
+  draw(st);
+  panel(st);
+}
+
+function draw(st){
+  // 计算热网段(本周期有流量)
+  hotSegs = new Set();
+  for (const s of st.segs){
+    const cur = Object.values(s.tx).reduce((a,b)=>a+b,0);
+    if (cur > (prevTx[s.name]||0)) hotSegs.add(s.name);
+    prevTx[s.name] = cur;
+  }
+  svg.innerHTML = '';
+  const defs = el('defs',{});
+  defs.innerHTML = '<marker id="arrB" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#60a5fa"/></marker>'+
+                   '<marker id="arrG" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#4ade80"/></marker>';
+  svg.appendChild(defs);
+  const pos = {}; for (const n of topo.nodes) pos[n.id] = n;
+  // 网段:交汇点 + 到各成员的线
+  for (const s of topo.segs){
+    const info = st.segs.find(x=>x.name===s.name) || {up:true};
+    const cls = 'segline' + (info.up ? (hotSegs.has(s.name)?' hot':'') : ' down');
+    for (const nid of s.nodes){
+      const p = pos[nid]; if (!p) continue;
+      svg.appendChild(el('line',{x1:s.x, y1:s.y, x2:p.x, y2:p.y, class:cls}));
+    }
+    svg.appendChild(el('circle',{cx:s.x, cy:s.y, r:3.5, class:'segdot'+(hotSegs.has(s.name)&&info.up?' hot':'')}));
+    const t = el('text',{x:s.x, y:s.y-6, class:'lbl'}); t.textContent = s.name + (info.up?'':' ✕');
+    t.setAttribute('fill', info.up ? '#7c8db0' : '#f87171'); svg.appendChild(t);
+  }
+  // 树边:rpt 蓝虚线 / spt 绿实线
+  for (const e of st.edges){
+    const a = pos[e.from], b = pos[e.to]; if (!a||!b) continue;
+    const mx=(a.x+b.x)/2, my=(a.y+b.y)/2 - 8;
+    svg.appendChild(el('path',{d:`M${a.x},${a.y} Q${mx},${my} ${b.x},${b.y}`, class:e.kind==='spt'?'edge-spt':'edge-rpt'}));
+  }
+  // 节点
+  for (const n of topo.nodes){
+    const cls = n.kind==='router' ? 'node-r'+(n.rp?' node-rp':'') : (n.kind==='source'?'node-s':'node-h');
+    svg.appendChild(el('circle',{cx:n.x, cy:n.y, r:n.kind==='router'?12:8, class:cls}));
+    const t = el('text',{x:n.x, y:n.y+(n.kind==='router'?-16:14), class:'lbl'});
+    t.textContent = n.id + (n.rp?' (RP)':''); svg.appendChild(t);
+  }
+  document.getElementById('clock').textContent = ' t=' + (st.now/1000).toFixed(1) + 's';
+}
+
+function panel(st){
+  // 操作按钮
+  const A = document.getElementById('actions');
+  if (!A.dataset.init){
+    A.dataset.init = 1;
+    const hosts = ['H4','H6','H7','H8','H10'];
+    let html = '<div>接收者: ' + hosts.map(h=>`<button id="bj${h}" onclick="act('join','${h}')">${h} 加入</button><button id="bl${h}" onclick="act('leave','${h}')">离</button>`).join('') + '</div>';
+    html += `<div>源: <button onclick="actSrc(true)">S1 开播</button><button onclick="actSrc(false)">停播</button></div>`;
+    html += '<div>链路: ' + topo.segs.map(s=>`<button id="lk${s.name}" onclick="actLink('${s.name}')">${s.name}</button>`).join('') + '</div>';
+    A.innerHTML = html;
+  }
+  for (const h of st.hosts){
+    const bj = document.getElementById('bj'+h.id), bl = document.getElementById('bl'+h.id);
+    if (bj){ bj.className = h.joined?'on':''; bl.className = h.joined?'':'off'; }
+  }
+  for (const s of st.segs){ const b = document.getElementById('lk'+s.name); if (b) b.className = s.up?'':'off'; }
+  // 接收者统计
+  document.getElementById('hosts').innerHTML = '<table><tr><th>主机</th><th>加入</th><th>收</th><th>丢</th><th>重</th></tr>' +
+    st.hosts.map(h=>`<tr><td>${h.id}</td><td>${h.joined?'✓':''}</td><td>${h.recv}</td>`+
+      `<td class="${h.lost?'stat-bad':'stat-ok'}">${h.lost}</td><td class="${h.dup?'stat-bad':'stat-ok'}">${h.dup}</td></tr>`).join('') + '</table>';
+  // 路由器状态
+  document.getElementById('routers').innerHTML = st.routers.map(r=>
+    `<h3>${r.id}${r.dr.length? ' <span class="muted">DR@'+r.dr.join(',')+'</span>':''}</h3>` +
+    (r.states.length ? '<table><tr><th>状态项</th><th>IIF</th><th>OIF</th><th>标志</th></tr>' +
+      r.states.map(s=>`<tr><td>${s.key}</td><td>${s.iif||''}</td><td>${(s.oifs||[]).join('<br>')}</td><td>${(s.flags||[]).join(' ')}</td></tr>`).join('') + '</table>'
+      : '<div class="muted">无该组状态</div>')
+  ).join('');
+}
+
+async function act(op, h){ await fetch('/api/action',{method:'POST',body:JSON.stringify({op, host:h, group:document.getElementById('group').value})}); }
+async function actSrc(on){ await fetch('/api/action',{method:'POST',body:JSON.stringify({op:'source', src:'S1', on})}); }
+async function actLink(name){
+  const b = document.getElementById('lk'+name);
+  const up = b.className === 'off';
+  await fetch('/api/action',{method:'POST',body:JSON.stringify({op:'link', seg:name, on:up})});
+}
+load();
+</script>
+</body>
+</html>
